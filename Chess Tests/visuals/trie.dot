@@ -1,0 +1,10 @@
+digraph Trie {
+node [shape=circle];
+"" -> "n" [label="n"];
+"n" -> "no" [label="o"];
+"no" -> "nod" [label="d"];
+"nod" -> "node" [label="e"];
+"node" -> "node3" [label="3"];
+"node" -> "node2" [label="2"];
+"node" -> "node1" [label="1"];
+}

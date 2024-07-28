@@ -1,0 +1,2213 @@
+#include <iostream>
+#include <chrono>
+#include <vector>
+#include <string>
+#include "raylib.h"
+#include <unordered_map>
+#include <algorithm>
+#include <cmath>
+#include <random>
+#include <fstream>
+#include <thread>
+
+using namespace std;
+using namespace chrono;
+
+Sound ChessPiecePlaced;
+Sound ChessPieceCaptured;
+Sound KingChecked;
+Sound GameStarts;
+Sound GameEnds;
+string ChessPiecePlacedFile = "Resources\\Audio\\ChessPiecePlaced.wav";
+string ChessPieceCapturedFile = "Resources\\Audio\\ChessPieceCaptured.wav";
+string KingCheckedFile = "Resources\\Audio\\KingChecked.wav";
+string GameStartsFile = "Resources\\Audio\\GameStart.wav";
+string GameEndsFile = "Resources\\Audio\\GameEnd.wav";
+string fontFile = "Resources\\Fonts\\Roboto\\Roboto-Regular.ttf";
+string programIcon = "Resources\\BlackPieces\\bn.png";
+
+Font myFont; // Global variable, initialize at beginning.
+
+const int screenWidth = 1000;
+const int screenHeight = 520;
+const int boardSize = 8;
+const int tileSize = 65;
+const int MaxHistorySize = 100;
+
+Color lightSquare = {238, 238, 210, 255};
+Color darkSquare = {118, 150, 86, 255};
+Color Transparent = {0, 0, 0, 0};
+Color Background = {49, 46, 43, 255};
+// Color MoveHighlight = { 187, 204, 68, 255};
+Color MoveHighlight = Fade({255, 255, 0, 200}, 0.5);
+Color MovesForPieceHighLight = Fade({255, 0, 0, 200}, 0.5);
+
+int offsets;
+
+const char EMPTY = 'e';
+const char PAWN = 'P';
+const char ROOK = 'R';
+const char KNIGHT = 'N';
+const char BISHOP = 'B';
+const char QUEEN = 'Q';
+const char KING = 'K';
+
+const int Total_tiles = 64;
+enum class PromotionPiece
+{
+    QUEEN,
+    ROOK,
+    KNIGHT,
+    BISHOP
+};
+
+void DrawTextWithCustomFont(const char *text, float posX, float posY, float fontSize, Color color)
+{
+    Vector2 Position = {posX, posY};
+    DrawTextEx(myFont, text, Position, fontSize, 1.0, color);
+}
+
+pair<float, float> CalculateTextPosition(Rectangle rect, string textToShow)
+{
+    float textX = rect.x + (rect.width - MeasureText(textToShow.c_str(), 20)) / 2;
+    float textY = rect.y + (rect.height - 20) / 2;
+    return make_pair(textX, textY);
+}
+
+Rectangle CalculateTextBounds(string text, float fontSize, float x, float y)
+{
+    float textWidth = static_cast<float>(MeasureText(text.c_str(), static_cast<int>(fontSize))) - fontSize;
+    float textHeight = fontSize + 5; // Assuming single line text
+
+    // Define the Rectangle based on text dimensions and position
+    return {x, y, textWidth, textHeight};
+}
+
+void DrawButton(string text, float PosX, float PosY)
+{
+    float fontSize = 25;
+    Rectangle button = CalculateTextBounds(text, fontSize, PosX, PosY);
+    DrawRectangle(static_cast<int>(button.x), static_cast<int>(button.y), static_cast<int>(button.width), static_cast<int>(button.height), GRAY);
+    DrawTextWithCustomFont(text.c_str(), button.x, button.y, fontSize, BLACK);
+}
+
+class ReadWrite
+{
+
+    virtual int readEloFromFile() = 0;
+    virtual void saveEloToFile() const = 0;
+};
+
+class ChessPiece
+{
+public:
+    char type;
+    char color;
+    bool firstMove;
+    bool isSlidingPiece;
+    Texture texture;
+    Rectangle rectangle;
+    bool isDragged;
+    bool canCastleQueenSide;
+    bool canCastleKingSide;
+
+    ChessPiece(char pieceType = EMPTY, char pieceColor = EMPTY, bool isFirstMove = true)
+    {
+        type = pieceType;
+        color = pieceColor;
+        firstMove = true;
+        isSlidingPiece = (toupper(type) == ROOK) || (toupper(type) == BISHOP) || (toupper(type) == QUEEN);
+        canCastleQueenSide = false;
+        canCastleKingSide = false;
+
+        AssignTextures();
+        rectangle.width = tileSize;
+        rectangle.height = tileSize;
+        isDragged = false;
+    }
+
+    void AssignTextures()
+    {
+        if (type != EMPTY)
+        {
+            string fileName = "Resources\\";
+            fileName += (color == 'W') ? "WhitePieces\\" : "BlackPieces\\";
+            fileName += tolower(color);
+            fileName += tolower(type);
+            fileName += ".png";
+            texture = LoadTexture(fileName.c_str());
+        }
+    }
+
+    void DestroyTextures()
+    {
+        if (type != EMPTY)
+        {
+            cout << "Unloaded Texture for: " << color << " " << type << endl;
+            UnloadTexture(texture);
+        }
+    }
+};
+
+class ChessBoard
+{
+private:
+    vector<int> SlidingPieceMoveData;
+    vector<int> PawnMoveData;
+    vector<int> KnightMoveData;
+    vector<int> KingMoveData;
+    vector<int> MovesForSelectedPiece;
+    vector<int> OpponentMoves;
+
+    bool DoCastle;
+    bool PieceIsCaptured;
+
+    pair<int, int> MoveIndices;
+
+    const int pawnScore = 1;
+    const int rookScore = 5;
+    const int knightScore = 3;
+    const int bishopScore = 3;
+    const int queenScore = 9;
+    const int kingScore = 100;
+
+public:
+    bool currentPlayerIsWhite;
+    ChessPiece board[Total_tiles];
+    vector<string> moveHistory;
+
+    ChessBoard()
+    {
+
+        currentPlayerIsWhite = true;
+        DoCastle = false;
+        PieceIsCaptured = false;
+        MoveIndices = {-1, -1};
+    }
+
+    int getPieceScore(const ChessPiece &piece) const
+    {
+        switch (toupper(piece.type))
+        {
+        case PAWN:
+            return pawnScore;
+        case ROOK:
+            return rookScore;
+        case KNIGHT:
+            return knightScore;
+        case BISHOP:
+            return bishopScore;
+        case QUEEN:
+            return queenScore;
+        case KING:
+            return kingScore;
+        default:
+            return 0; // Unknown piece type
+        }
+    }
+
+    void AddMoveToHistory(string move)
+    {
+        moveHistory.push_back(move);
+    }
+
+    void promotePawn(int toTile)
+    {
+        bool PawnPromoted = false;
+        // cout << "\nPawn promotion! Choose a piece (Q, R, N, B): ";
+
+        ChessPiece promotedPiece;
+        //
+        // if (IsKeyPressed(KEY_Q)) {
+        //    promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(QUEEN) : tolower(QUEEN), currentPlayerIsWhite ? 'W' : 'B');
+        //    cout << "Piece Promoted to Queen" << endl;
+        //    PawnPromoted = false;
+        //    //break;
+        //}
+        // else if (IsKeyPressed(KEY_R)) {
+        //    promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(ROOK) : tolower(ROOK), currentPlayerIsWhite ? 'W' : 'B');
+        //    cout << "Piece Promoted to Rook" << endl;
+        //    //break;
+        //}
+        // else if (IsKeyPressed(KEY_N)) {
+        //    promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(KNIGHT) : tolower(KNIGHT), currentPlayerIsWhite ? 'W' : 'B');
+        //    cout << "Piece Promoted to Knight" << endl;
+        //    //break;
+        //}
+        // else if (IsKeyPressed(KEY_B)) {
+        //    promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(BISHOP) : tolower(BISHOP), currentPlayerIsWhite ? 'W' : 'B');
+        //    cout << "Piece Promoted to Bishop" << endl;
+        //    //break;
+        //}
+        // else {
+        //    cout << "Invalid choice. Defaulting to Queen promotion." << endl;
+        //    promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(QUEEN) : tolower(QUEEN), currentPlayerIsWhite ? 'W' : 'B');
+        //    cout << "Piece Promoted to Queen" << endl;
+        //    //break;
+        //}
+
+        promotedPiece = ChessPiece(currentPlayerIsWhite ? toupper(QUEEN) : tolower(QUEEN), currentPlayerIsWhite ? 'W' : 'B');
+        // cout << "Piece Promoted to Queen" << endl;
+        // board[toTile].DestroyTextures();
+        //  Update the board with the promoted piece
+        board[toTile] = promotedPiece;
+        SetPiecePositions();
+    }
+
+    vector<int> FilterValidMoves(int fromIndex, vector<int> possibleMoves) const
+    {
+        ChessPiece piece = board[fromIndex];
+
+        // Filter out moves that leave the king in check
+        vector<int> filteredMoves;
+        for (int toTile : possibleMoves)
+        {
+            // Simulate the move on a temporary board
+            ChessBoard tempBoard = *this;
+            tempBoard.MakeMove(fromIndex, toTile);
+
+            // Check if the king is in check after the move
+            if (!tempBoard.isCheck(tempBoard, piece.color, "Board: Filter Valid Moves"))
+            {
+                filteredMoves.push_back(toTile);
+            }
+        }
+        return filteredMoves;
+    }
+
+    int calculatePlayerScore(char playerColor) const
+    {
+        int totalScore = 0;
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            if (board[i].color == playerColor)
+            {
+                totalScore += getPieceScore(board[i]);
+            }
+        }
+        return totalScore;
+    }
+
+    void initializeBoardFromFEN(const string &fen)
+    {
+        moveHistory.clear();
+        MoveIndices = {-1, -1};
+        int row = 0, col = 0;
+
+        // Parse the FEN string
+        for (char symbol : fen)
+        {
+            if (symbol == ' ')
+            {
+                break; // Stop parsing after the board section
+            }
+
+            if (symbol == '/')
+            {
+                row++;
+                col = 0;
+            }
+            else if (isdigit(symbol))
+            {
+                // Fill empty squares
+                int numEmptySquares = symbol - '0';
+                for (int i = 0; i < numEmptySquares; i++)
+                {
+                    board[row * 8 + col] = ChessPiece(EMPTY, EMPTY);
+                    col++;
+                }
+            }
+            else
+            {
+                char pieceColor = isupper(symbol) ? 'W' : 'B';
+                board[row * 8 + col] = ChessPiece(symbol, pieceColor);
+                col++;
+            }
+        }
+
+        // Set the current player based on FEN
+        currentPlayerIsWhite = (fen.find("w") != string::npos);
+
+        int WhiteKingIndex = GetKingIndex('W');
+        int BlackKingIndex = GetKingIndex('B');
+
+        size_t castlingRightsPos = fen.find_last_of(" ");
+        if (castlingRightsPos != string::npos && castlingRightsPos + 1 < fen.length())
+        {
+            string castlingRights = fen.substr(castlingRightsPos + 1);
+            for (char c : castlingRights)
+            {
+                if (c == 'K')
+                {
+
+                    board[WhiteKingIndex].canCastleKingSide = true;
+                }
+                else if (c == 'Q')
+                {
+                    // White can castle queenside
+                    // Update the appropriate rook's firstMove flag
+                    board[WhiteKingIndex].canCastleQueenSide = true;
+                }
+                else if (c == 'k')
+                {
+                    // Black can castle kingside
+                    // Update the appropriate rook's firstMove flag
+                    board[BlackKingIndex].canCastleKingSide = true;
+                }
+                else if (c == 'q')
+                {
+                    // Black can castle queenside
+                    // Update the appropriate rook's firstMove flag
+                    board[BlackKingIndex].canCastleQueenSide = true;
+                }
+            }
+        }
+
+        // Set piece positions and additional FEN features if needed
+        SetPiecePositions();
+        // ...code for additional FEN features
+    }
+
+    void saveMatchHistoryToFile() const
+    {
+        // Open file for writing (in append mode)
+        ofstream file("MatchHistory.txt", ios::app);
+        if (!file.is_open())
+        {
+            cerr << "Error: Unable to open file for writing." << endl;
+            return;
+        }
+
+        // Generate FEN string from current board state
+        string fen;
+        for (int row = 0; row < 8; row++)
+        {
+            int emptyCount = 0;
+            for (int col = 0; col < 8; col++)
+            {
+                int index = row * 8 + col;
+                if (board[index].type == EMPTY)
+                {
+                    emptyCount++;
+                }
+                else
+                {
+                    if (emptyCount > 0)
+                    {
+                        fen += to_string(emptyCount);
+                        emptyCount = 0;
+                    }
+                    fen += board[index].type;
+                }
+            }
+            if (emptyCount > 0)
+            {
+                fen += to_string(emptyCount);
+            }
+            if (row < 7)
+            {
+                fen += '/';
+            }
+        }
+        fen += (currentPlayerIsWhite ? " w " : " b ");
+        // Add additional FEN features if needed
+
+        // Write FEN string to file
+        file << fen << endl; // Append newline after each FEN string
+        // Close file
+        file.close();
+
+        cout << "Saved FEN string" << endl;
+    }
+
+    void InitializeDefaultBoard()
+    {
+
+        currentPlayerIsWhite = true;
+        // Set up the board with pieces in their initial positions
+        string DefaultFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        initializeBoardFromFEN(DefaultFEN);
+    }
+
+    void DisplayBoard() const
+    {
+        cout << "8 ";
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            // cout << (i/8) + 1  << " ";
+            cout << "[" << board[i].type << "]";
+            if ((i + 1) % 8 == 0 && (i + 1) < Total_tiles)
+            {
+                cout << endl;
+                cout << 8 - (i + 1) / 8 << " ";
+            }
+
+            // cout << endl;
+        }
+        cout << endl;
+        cout << "   a  b  c  d  e  f  g  h";
+    }
+
+    pair<int, int> PieceCoordinates(int pieceIndex)
+    {
+        if (pieceIndex < 0 || pieceIndex >= Total_tiles)
+        {
+
+            return make_pair(-1, -1);
+        }
+        int rank = pieceIndex / boardSize;
+        int file = pieceIndex % boardSize;
+        return make_pair(rank, file);
+    }
+
+    void SetPiecePositions()
+    {
+        // Set initial positions of the pieces
+        for (int index = 0; index < Total_tiles; index++)
+        {
+            pair<int, int> PieceCoords = PieceCoordinates(index);
+            board[index].rectangle.x = static_cast<float>((PieceCoords.second) * tileSize);
+            board[index].rectangle.y = static_cast<float>((PieceCoords.first) * tileSize);
+        }
+    }
+
+    void DrawBoard()
+    {
+        for (int index = 0; index < Total_tiles; index++)
+        {
+
+            pair<int, int> PieceCoords = PieceCoordinates(index);
+
+            Color squareColor = (PieceCoords.first + PieceCoords.second) % 2 == 0 ? lightSquare : darkSquare;
+
+            int LocationX = PieceCoords.second * tileSize;
+            int LocationY = PieceCoords.first * tileSize;
+
+            DrawRectangle(LocationX, LocationY, tileSize, tileSize, squareColor);
+
+            if (MoveIndices.first == index || MoveIndices.second == index)
+            {
+                DrawRectangle(LocationX, LocationY, tileSize, tileSize, MoveHighlight);
+            }
+
+            for (auto move : MovesForSelectedPiece)
+            {
+                if (move == index)
+                {
+                    DrawRectangle(LocationX, LocationY, tileSize, tileSize, MovesForPieceHighLight);
+                }
+            }
+        }
+    }
+
+    void DrawChessPiece()
+    {
+        for (int index = 0; index < Total_tiles; index++)
+        {
+            DrawTexture(board[index].texture, static_cast<int>(board[index].rectangle.x), static_cast<int>(board[index].rectangle.y), WHITE);
+        }
+    }
+
+    int GetKingIndex(char playercolor) const
+    {
+        for (int index = 0; index < Total_tiles; index++)
+        {
+            if (toupper(board[index].type) == KING && board[index].color == playercolor)
+            {
+                return index;
+            }
+        }
+
+        cout << "\n\nGetKingIndex: KING not Found\n\n";
+        exit(404);
+    }
+
+    int getTileIndex(float x, float y, int tileSize)
+    {
+        // Calculate the file (column) index
+        int file = static_cast<int>(x / tileSize);
+        // Calculate the rank (row) index
+        int rank = static_cast<int>(y / tileSize);
+        // Calculate the index in the array
+        int index = rank * 8 + file;
+        return index;
+    }
+
+    void UpdateChessPiece(ChessPiece &piece, int InitialIndex)
+    {
+        if (piece.type != EMPTY)
+        {
+
+            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), piece.rectangle))
+            {
+                piece.isDragged = true;
+                MovesForSelectedPiece = GetAllPossibleMovesForPiece(piece.type, InitialIndex);
+            }
+            if (piece.isDragged)
+            {
+                piece.rectangle.x = GetMouseX() - piece.rectangle.width / 2;
+                piece.rectangle.y = GetMouseY() - piece.rectangle.height / 2;
+                if (piece.rectangle.x < 0)
+                    piece.rectangle.x = 0;
+                if (piece.rectangle.y < 0)
+                    piece.rectangle.y = 0;
+                if (piece.rectangle.x + piece.rectangle.width > GetScreenWidth())
+                    piece.rectangle.x = GetScreenWidth() - piece.rectangle.width;
+                if (piece.rectangle.y + piece.rectangle.height > GetScreenHeight())
+                    piece.rectangle.y = GetScreenHeight() - piece.rectangle.height;
+
+                float tileX = round(piece.rectangle.x / tileSize) * tileSize;
+                float tileY = round(piece.rectangle.y / tileSize) * tileSize;
+
+                int FinalIndex = getTileIndex(tileX, tileY, tileSize);
+                string move = ConvertToChessNotation(InitialIndex, FinalIndex);
+
+                if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON))
+                {
+                    if (isValidMove(FinalIndex))
+                    {
+                        piece.isDragged = false;
+
+                        piece.rectangle.x = tileX;
+                        piece.rectangle.y = tileY;
+                        MakeCompleteMove(InitialIndex, FinalIndex, move);
+
+                        cout << "White Plays: " << move << "\n";
+                        // WaitTime(0.5);
+                    }
+                    else
+                    {
+                        piece.isDragged = false;
+                        int file = InitialIndex % 8;
+                        int rank = InitialIndex / 8;
+                        piece.rectangle.x = static_cast<float>(file * tileSize);
+                        piece.rectangle.y = static_cast<float>(rank * tileSize);
+                    }
+                }
+            }
+        }
+    }
+
+    bool isValidMove(int index)
+    {
+        for (auto Move : MovesForSelectedPiece)
+        {
+            if (index == Move)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void MakeMove(int fromTile, int toTile)
+    {
+        string move = ConvertToChessNotation(fromTile, toTile);
+
+        // Check if it's a castling move and if castling is allowed
+        if (IsCastlingMove(move, board[fromTile]))
+        {
+
+            if (toTile == 62 || toTile == 7)
+            { // Kingside castling
+                int rookFromTile = (fromTile == 60) ? 63 : 7;
+                int rookToTile = (fromTile == 60) ? 61 : 5;
+                board[rookFromTile].firstMove = false;
+                board[rookToTile] = board[rookFromTile];
+                board[rookFromTile] = ChessPiece();
+            }
+            else if (toTile == 58 || toTile == 2)
+            { // Queenside castling
+                int rookFromTile = (fromTile == 60) ? 56 : 0;
+                int rookToTile = (fromTile == 60) ? 59 : 3;
+                board[rookFromTile].firstMove = false;
+                board[rookToTile] = board[rookFromTile]; // Move the rook
+                board[rookFromTile] = ChessPiece();      // Empty the original rook square
+            }
+        }
+
+        board[fromTile].firstMove = false;
+        board[toTile] = board[fromTile];
+        board[fromTile] = ChessPiece(); // Empty the source square
+    }
+
+    bool IsCastlingMove(string move, ChessPiece pieceMoved)
+    {
+
+        return toupper(pieceMoved.type) == KING && (move == "e1g1" || move == "e1c1" || move == "e8g8" || move == "e8c8");
+    }
+
+    void MakeCompleteMove(int fromTile, int toTile, string move)
+    {
+        PieceIsCaptured = isValidCaptureMove(fromTile, toTile);
+        MakeMove(fromTile, toTile);
+
+        // Check for pawn promotion
+        if (toupper(board[toTile].type) == PAWN)
+        {
+            // White pawn promotion
+            if (toTile >= 0 && toTile <= 7)
+            {
+                promotePawn(toTile);
+            }
+            // Black pawn promotion
+            else if (toTile >= 56 && toTile <= 63)
+            {
+                cout << "Test";
+                promotePawn(toTile);
+            }
+        }
+
+        if (moveHistory.size() >= MaxHistorySize)
+        {
+            moveHistory.clear();
+        }
+
+        AddMoveToHistory(move);
+        MoveIndices = {fromTile, toTile};
+
+        SetPiecePositions();
+
+        currentPlayerIsWhite = !currentPlayerIsWhite;
+        PlayChessSound();
+        // DisplayScores();
+        SlidingPieceMoveData.clear();
+        PawnMoveData.clear();
+        KnightMoveData.clear();
+        KingMoveData.clear();
+        MovesForSelectedPiece.clear();
+    }
+
+    void PlayChessSound() const
+    {
+        ChessBoard temp = *this;
+        char PlayerColor = (temp.isCurrentPlayerWhite()) ? 'W' : 'B';
+        if (isCheck(temp, PlayerColor, "board: Play Chess Sound"))
+        {
+            PlaySound(KingChecked);
+        }
+        else if (PieceIsCaptured)
+        {
+            PlaySound(ChessPieceCaptured);
+        }
+        else
+        {
+            PlaySound(ChessPiecePlaced);
+        }
+    }
+
+    bool isCurrentPlayerWhite() const
+    {
+        return currentPlayerIsWhite;
+    }
+
+    void DisplayScores() const
+    {
+        int whiteScore = calculatePlayerScore('W');
+        int blackScore = calculatePlayerScore('B');
+        cout << endl
+             << "White score: " << whiteScore << " | Black score: " << blackScore << endl
+             << endl;
+    }
+
+    void ComputeSlidingPieceMoves(int pieceIndex, vector<int> &possibleMoves) const
+    {
+        ChessPiece piece = board[pieceIndex];
+        int row = pieceIndex / 8;
+        int col = pieceIndex % 8;
+
+        // Offsets for sliding directions: up, down, left, right, diagonals
+        vector<int> offsets = {8, -8, 1, -1, 7, -7, 9, -9};
+
+        if (toupper(piece.type) == ROOK || toupper(piece.type) == QUEEN)
+        {
+            for (int i = 0; i < 4; ++i)
+            {
+                int offset = offsets[i];
+                int newIndex = pieceIndex + offset;
+                while (newIndex >= 0 && newIndex < Total_tiles)
+                {
+                    // Check if the new index is within the bounds of the board
+                    if ((offset == 1 || offset == -1) && newIndex / 8 != row)
+                        break; // If moving horizontally, ensure it stays on the same row
+                    if (board[newIndex].type != EMPTY)
+                    {
+                        if (board[newIndex].color != piece.color)
+                        {
+                            // If the square contains an enemy piece, add it to possibleMoves and stop searching in this direction
+                            possibleMoves.push_back(newIndex);
+                        }
+                        break; // Stop searching in this direction if we encounter a piece
+                    }
+                    possibleMoves.push_back(newIndex);
+                    newIndex += offset;
+                }
+            }
+        }
+
+        if (toupper(piece.type) == BISHOP || toupper(piece.type) == QUEEN)
+        {
+            for (int i = 4; i < 8; ++i)
+            {
+                int offset = offsets[i];
+                int newIndex = pieceIndex + offset;
+                while (newIndex >= 0 && newIndex < Total_tiles)
+                {
+                    // Check if the new index is within the bounds of the board
+                    int newRow = newIndex / 8;
+                    int newCol = newIndex % 8;
+                    if (abs(newRow - row) != abs(newCol - col))
+                        break; // If not moving diagonally, break
+                    if (board[newIndex].type != EMPTY)
+                    {
+                        if (board[newIndex].color != piece.color)
+                        {
+                            // If the square contains an enemy piece, add it to possibleMoves and stop searching in this direction
+                            possibleMoves.push_back(newIndex);
+                        }
+                        break; // Stop searching in this direction if we encounter a piece
+                    }
+                    possibleMoves.push_back(newIndex);
+                    newIndex += offset;
+                }
+            }
+        }
+    }
+
+    void ComputeKnightMoves(int pieceIndex, vector<int> &possibleMoves) const
+    {
+        ChessPiece piece = board[pieceIndex];
+        // Offsets for knight's moves
+        vector<int> rowOffsets = {-2, -1, 1, 2, 2, 1, -1, -2};
+        vector<int> colOffsets = {1, 2, 2, 1, -1, -2, -2, -1};
+
+        int row = pieceIndex / 8;
+        int col = pieceIndex % 8;
+
+        if (toupper(piece.type) == KNIGHT)
+        {
+            for (int i = 0; i < 8; ++i)
+            {
+                int newRow = row + rowOffsets[i];
+                int newCol = col + colOffsets[i];
+
+                // Check if the new position is within the board bounds
+                if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8)
+                {
+                    int newIndex = newRow * 8 + newCol;
+                    // Check if the square is empty or contains an opponent's piece
+                    if (board[newIndex].type == EMPTY || board[newIndex].color != piece.color)
+                    {
+                        possibleMoves.push_back(newIndex);
+                    }
+                }
+            }
+        }
+    }
+
+    void ComputePawnMoves(int pieceIndex, vector<int> &possibleMoves) const
+    {
+        ChessPiece piece = board[pieceIndex];
+        int row = pieceIndex / 8;
+        int col = pieceIndex % 8;
+
+        // Determine the direction of pawn movement based on its color
+        int direction = (piece.color == 'W') ? -1 : 1;
+
+        // Forward movement
+        int forwardOne = pieceIndex + direction * 8;
+        if (forwardOne >= 0 && forwardOne < Total_tiles && board[forwardOne].type == EMPTY)
+        {
+            possibleMoves.push_back(forwardOne);
+            // Check if the pawn is in its starting position and can move two squares forward
+            if ((row == 6 && piece.color == 'W') || (row == 1 && piece.color == 'B'))
+            {
+                int forwardTwo = forwardOne + direction * 8;
+                if (board[forwardTwo].type == EMPTY)
+                {
+                    possibleMoves.push_back(forwardTwo);
+                }
+            }
+        }
+
+        // Capture moves
+        vector<int> captureOffsets = {direction * 7, direction * 9};
+        for (int offset : captureOffsets)
+        {
+            int targetIndex = pieceIndex + offset;
+            int targetRow = targetIndex / 8;
+            int targetCol = targetIndex % 8;
+            int pieceCol = pieceIndex % 8;
+            // Ensure target column is within bounds and not wrapping around the board
+            if (targetCol >= 0 && targetCol < 8 && abs(targetCol - pieceCol) <= 1)
+            {
+                // Check if the target square is occupied by an opponent's piece
+                if (board[targetIndex].type != EMPTY && board[targetIndex].color != piece.color)
+                {
+                    possibleMoves.push_back(targetIndex);
+                }
+            }
+        }
+    }
+
+    void ComputeKingMoves(int KingIndex, vector<int> &possibleMoves) const
+    {
+        ChessPiece King = board[KingIndex];
+        int row = KingIndex / 8;
+        int col = KingIndex % 8;
+
+        // Offsets for king's moves
+        vector<int> rowOffsets = {-1, -1, -1, 0, 0, 1, 1, 1};
+        vector<int> colOffsets = {-1, 0, 1, -1, 1, -1, 0, 1};
+
+        // Check all 8 directions
+        for (int i = 0; i < 8; i++)
+        {
+            int newRow = row + rowOffsets[i];
+            int newCol = col + colOffsets[i];
+
+            // Check if the new position is within the board bounds
+            if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8)
+            {
+                int newIndex = newRow * 8 + newCol;
+                // Check if the square is empty or contains an opponent's piece
+                if ((board[newIndex].type == EMPTY || board[newIndex].color != King.color))
+                {
+                    possibleMoves.push_back(newIndex);
+                }
+            }
+        }
+
+        if ((King.color == 'B' && KingIndex == 4) || (King.color == 'W' && KingIndex == 60))
+        {
+            // Check for castling moves
+            if (King.firstMove && !IsTileUnderAttack(KingIndex))
+            {
+                // Check kingside castling
+                if (canCastleKingSide(KingIndex))
+                {
+                    possibleMoves.push_back(KingIndex + 2);
+                }
+                // Check queenside castling
+                if (canCastleQueenide(KingIndex))
+                {
+                    possibleMoves.push_back(KingIndex - 2);
+                }
+            }
+        }
+    }
+
+    bool canCastleKingSide(int KingIndex) const
+    {
+        if (!board[KingIndex].canCastleKingSide)
+        {
+            return false;
+        }
+        int RookIndex = KingIndex + 3;
+        if (board[RookIndex].type != ROOK && !(board[RookIndex].firstMove))
+        {
+            return false;
+        }
+
+        for (int i = KingIndex + 1; i < RookIndex; i++)
+        {
+            if (board[i].type != EMPTY || IsTileUnderAttack(i))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool canCastleQueenide(int KingIndex) const
+    {
+        if (!board[KingIndex].canCastleQueenSide)
+        {
+            return false;
+        }
+
+        int RookIndex = KingIndex - 4;
+        if (board[RookIndex].type != ROOK && !(board[RookIndex].firstMove))
+        {
+            return false;
+        }
+
+        for (int i = KingIndex - 1; i > RookIndex; i--)
+        {
+            if (board[i].type != EMPTY || IsTileUnderAttack(i))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool isCheck(const ChessBoard chessboard, char playerColor, string calledby) const
+    {
+        // Find the king's position
+        int kingIndex = -100;
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            if (toupper(chessboard.board[i].type) == KING && chessboard.board[i].color == playerColor)
+            {
+                kingIndex = i;
+                break;
+            }
+        }
+
+        if (kingIndex == -100)
+        {
+            cout << kingIndex;
+            cout << "\nError Code 404: King not found. \n\n";
+            cout << calledby << "\n\n";
+            // exit(404);
+            return false;
+        }
+
+        // Iterate through opponent's pieces and see if any can attack the king
+        char opponentColor = (playerColor == 'W') ? 'B' : 'W';
+
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            vector<int> possibleMoves;
+            if (chessboard.board[i].color == opponentColor)
+            {
+                if (toupper(chessboard.board[i].type) == ROOK || toupper(chessboard.board[i].type) == BISHOP || toupper(chessboard.board[i].type) == QUEEN)
+                {
+                    ComputeSlidingPieceMoves(i, possibleMoves);
+                }
+                else if (toupper(chessboard.board[i].type) == PAWN)
+                {
+                    ComputePawnMoves(i, possibleMoves);
+                }
+                else if (toupper(chessboard.board[i].type) == KNIGHT)
+                {
+                    ComputeKnightMoves(i, possibleMoves);
+                }
+                else if (toupper(chessboard.board[i].type) == KING)
+                {
+                    ComputeKingMoves(i, possibleMoves);
+                }
+
+                // Check if any of the possible moves include the king's position
+                for (int move : possibleMoves)
+                {
+                    if (move == kingIndex)
+                    {
+                        possibleMoves.clear();
+                        return true; // King is in check
+                    }
+                }
+                possibleMoves.clear();
+            }
+        }
+
+        return false; // King is not in check
+    }
+
+    bool isCheckmate(ChessBoard &chessboard, char playerColor) const
+    {
+
+        vector<int> possibleMoves = GetAllPossibleMoves(playerColor);
+        if (isCheck(chessboard, playerColor, "board: Is Check Mate") && possibleMoves.size() == 0)
+        {
+            return true; // No Valid Move, CheckMate
+        }
+
+        return false; // King is either not in check, or can escape(moves > 0)
+    }
+
+    vector<int> GetAllPossibleMoves(char playerColor) const
+    {
+
+        vector<int> possibleMoves;
+
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            if (board[i].color == playerColor)
+            {
+                vector<int> moves;
+
+                // Compute moves based on the piece type
+                if (toupper(board[i].type) == ROOK || toupper(board[i].type) == BISHOP || toupper(board[i].type) == QUEEN)
+                {
+                    ComputeSlidingPieceMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == PAWN)
+                {
+                    ComputePawnMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == KNIGHT)
+                {
+                    ComputeKnightMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == KING)
+                {
+                    ComputeKingMoves(i, moves);
+                }
+                moves = FilterValidMoves(i, moves);
+                for (auto move : moves)
+                {
+                    possibleMoves.push_back(move);
+                }
+            }
+        }
+
+        return possibleMoves;
+    }
+
+    vector<string> GetAllPossibleMovesInChessNotation(char playerColor) const
+    {
+        vector<string> possibleMoves;
+
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            if (board[i].color == playerColor)
+            {
+                vector<int> moves;
+
+                // Compute moves based on the piece type
+                if (toupper(board[i].type) == ROOK || toupper(board[i].type) == BISHOP || toupper(board[i].type) == QUEEN)
+                {
+                    ComputeSlidingPieceMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == PAWN)
+                {
+                    ComputePawnMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == KNIGHT)
+                {
+                    ComputeKnightMoves(i, moves);
+                }
+                else if (toupper(board[i].type) == KING)
+                {
+                    ComputeKingMoves(i, moves);
+                }
+
+                // Check if the move is legal (does not leave the king in check)
+                for (int toTile : moves)
+                {
+                    // Simulate the move
+                    ChessBoard tempBoard = *this;
+                    tempBoard.MakeMove(i, toTile);
+
+                    // Check if the king is in check after the move
+                    if (!tempBoard.isCheck(tempBoard, playerColor, "board: Get all possible moves in chess notation"))
+                    {
+                        // If not in check, add the move to possible moves
+                        possibleMoves.push_back(ConvertToChessNotation(i, toTile));
+                    }
+                }
+            }
+        }
+
+        return possibleMoves;
+    }
+
+    string ConvertToChessNotation(int fromTile, int toTile) const
+    {
+
+        string chessNotation = "";
+
+        // Convert the 'fromTile' index to chess notation
+        char fromCol = 'a' + (fromTile % 8);
+        int fromRow = 8 - (fromTile / 8);
+        chessNotation += fromCol;
+        chessNotation += to_string(fromRow);
+
+        // Add the 'toTile' index to chess notation
+        char toCol = 'a' + (toTile % 8);
+        int toRow = 8 - (toTile / 8);
+        chessNotation += toCol;
+        chessNotation += to_string(toRow);
+
+        return chessNotation;
+    }
+
+    int getAttacksOnSquare(int squareIndex, char opponentColor) const
+    {
+        int attacks = 0;
+        vector<int> opponentMoves = GetAllPossibleMoves(opponentColor);
+        for (int i = 0; i < opponentMoves.size(); ++i)
+        {
+            if (opponentMoves[i] == squareIndex)
+            {
+                attacks++;
+            }
+        }
+        return attacks;
+    }
+
+    bool IsTileUnderAttack(int &squareIndex) const
+    {
+
+        for (int i = 0; i < OpponentMoves.size(); i++)
+        {
+            if (OpponentMoves[i] == squareIndex)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void DisplayMoves()
+    {
+        for (auto move : OpponentMoves)
+        {
+            cout << move << endl;
+        }
+    }
+
+    vector<int> GetAllPossibleMovesForPiece(char type, int index) const
+    {
+        vector<int> moves;
+
+        // Compute moves based on the piece type
+        if (toupper(type) == ROOK || toupper(type) == BISHOP || toupper(type) == QUEEN)
+        {
+            ComputeSlidingPieceMoves(index, moves);
+        }
+        else if (toupper(type) == PAWN)
+        {
+            ComputePawnMoves(index, moves);
+        }
+        else if (toupper(type) == KNIGHT)
+        {
+            ComputeKnightMoves(index, moves);
+        }
+        else if (toupper(type) == KING)
+        {
+            ComputeKingMoves(index, moves);
+        }
+
+        moves = FilterValidMoves(index, moves);
+        return moves;
+    }
+
+    void DestroyBoard()
+    {
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            board[i].DestroyTextures();
+        }
+    }
+
+    ChessPiece GetPieceAtPosition(int index) const
+    {
+        return board[index];
+    }
+
+    vector<string> GetAllCaptureMovesInChessNotation(char color) const
+    {
+        vector<string> captureMoves;
+
+        for (int fromTile = 0; fromTile < Total_tiles; fromTile++)
+        {
+            ChessPiece piece = board[fromTile];
+            if (piece.color == color)
+            {
+                for (int toTile = 0; toTile < Total_tiles; toTile++)
+                {
+                    if (fromTile != toTile && isValidCaptureMove(fromTile, toTile))
+                    {
+                        string move = ConvertToChessNotation(fromTile, toTile);
+                        captureMoves.push_back(move);
+                    }
+                }
+            }
+        }
+
+        return captureMoves;
+    }
+
+    bool isValidCaptureMove(int fromTile, int toTile) const
+    {
+        ChessPiece fromPiece = board[fromTile];
+        ChessPiece toPiece = board[toTile];
+
+        return fromPiece.type != EMPTY && toPiece.type != EMPTY && fromPiece.color != toPiece.color;
+    }
+
+    pair<int, int> convertChessNotationToIndices(const string &move) const
+    {
+        int fromCol = move[0] - 'a';
+        int fromRow = 7 - (move[1] - '1');
+        int toCol = move[2] - 'a';
+        int toRow = 7 - (move[3] - '1');
+        int fromTile = fromRow * 8 + fromCol;
+        int toTile = toRow * 8 + toCol;
+        return make_pair(fromTile, toTile);
+    }
+
+    void ComputeOpponentMoves()
+    {
+        OpponentMoves = GetAllPossibleMoves(isCurrentPlayerWhite() ? 'B' : 'W');
+    }
+
+    bool isValidMoveFormat(const string &move) const
+    {
+        return (move.length() == 4 &&
+                move[0] >= 'a' && move[0] <= 'h' &&
+                move[1] >= '1' && move[1] <= '8' &&
+                move[2] >= 'a' && move[2] <= 'h' &&
+                move[3] >= '1' && move[3] <= '8');
+    }
+};
+
+class ChessEngine : public ReadWrite
+{
+    char PlayingAs;
+    const int Depth = 2; // Maximum depth for the Minimax algorithm
+
+    // Piece-square tables for each piece type
+    // Higher values indicate a more advantageous position for the piece
+
+    const int PawnPST[64] = {
+        99, 99, 99, 99, 99, 99, 99, 99,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        5, 5, 10, 25, 25, 10, 5, 5,
+        0, 0, 0, 20, 20, 0, 0, 0,
+        5, -5, -10, 0, 0, -10, -5, 5,
+        5, 10, 10, -20, -20, 10, 10, 5,
+        0, 0, 0, 0, 0, 0, 0, 0};
+    const int RooksPST[64] = {
+        0, 0, 0, 0, 0, 0, 0, 0,
+        5, 10, 10, 10, 10, 10, 10, 5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        0, 0, 0, 5, 5, 0, 0, 0};
+    const int KnightsPST[64] = {
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20, 0, 0, 0, 0, -20, -40,
+        -30, 0, 10, 15, 15, 10, 0, -30,
+        -30, 5, 15, 20, 20, 15, 5, -30,
+        -30, 0, 15, 20, 20, 15, 0, -30,
+        -30, 5, 10, 15, 15, 10, 5, -30,
+        -40, -20, 0, 5, 5, 0, -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50};
+    const int BishopsPST[64] = {
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -10, 0, 5, 10, 10, 5, 0, -10,
+        -10, 5, 5, 10, 10, 5, 5, -10,
+        -10, 0, 10, 10, 10, 10, 0, -10,
+        -10, 10, 10, 10, 10, 10, 10, -10,
+        -10, 5, 0, 0, 0, 0, 5, -10,
+        -20, -10, -10, -10, -10, -10, -10, -20};
+    const int QueensPST[64] = {
+        -20, -10, -10, -5, -5, -10, -10, -20,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -10, 0, 5, 5, 5, 5, 0, -10,
+        -5, 0, 5, 5, 5, 5, 0, -5,
+        0, 0, 5, 5, 5, 5, 0, -5,
+        -10, 5, 5, 5, 5, 5, 0, -10,
+        -10, 0, 5, 0, 0, 0, 0, -10,
+        -20, -10, -10, -5, -5, -10, -10, -20};
+    const int KingPST[64] = {
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -20, -30, -30, -40, -40, -30, -30, -20,
+        -10, -20, -20, -20, -20, -20, -20, -10,
+        20, 20, 0, 0, 0, 0, 20, 20,
+        20, 30, 10, 0, 0, 10, 30, 20};
+    const int KingEndgamePST[64]{
+        -50, -40, -30, -20, -20, -30, -40, -50,
+        -30, -20, -10, 0, 0, -10, -20, -30,
+        -30, -10, 20, 30, 30, 20, -10, -30,
+        -30, -10, 30, 40, 40, 30, -10, -30,
+        -30, -10, 30, 40, 40, 30, -10, -30,
+        -30, -10, 20, 30, 30, 20, -10, -30,
+        -30, -30, 0, 0, 0, 0, -30, -30,
+        -50, -30, -30, -30, -30, -30, -30, -50};
+
+public:
+    int engineEloRating = 500;
+    int NumberofMovesLookedAhead;
+    __int64 TimeTakenForSearch;
+
+    ChessEngine(char EngineColor) : PlayingAs(EngineColor), NumberofMovesLookedAhead(0)
+    {
+        engineEloRating = readEloFromFile();
+        NumberofMovesLookedAhead = 0;
+        TimeTakenForSearch = 0;
+    }
+
+    void shuffleMoves(vector<string> &possibleMoves)
+    {
+        unsigned seed = static_cast<unsigned>(system_clock::now().time_since_epoch().count());
+        shuffle(possibleMoves.begin(), possibleMoves.end(), default_random_engine(seed));
+    }
+
+    void DisplayMoves(vector<string> moves)
+    {
+        cout << endl;
+        for (string move : moves)
+        {
+            cout << move << " ";
+        }
+        cout << endl;
+    }
+
+    string GenerateMove(const ChessBoard &board)
+    {
+        float bestScore = -INFINITY;
+        string bestMove;
+        auto start = high_resolution_clock::now();
+        NumberofMovesLookedAhead = 0;
+
+        vector<string> possibleMoves = board.GetAllPossibleMovesInChessNotation(PlayingAs);
+        shuffleMoves(possibleMoves);
+
+        for (const string &move : possibleMoves)
+        {
+            ChessBoard tempBoard = board;
+
+            // tempBoard.isValidMove(move, fromTile, toTile);
+            pair<int, int> Indices = convertChessNotationToIndices(move);
+
+            // Simulate the move
+            MakeCompleteMove(Indices.first, Indices.second, tempBoard);
+
+            // Calculate the score using Minimax with alpha-beta pruning
+            float score = Minimax(tempBoard, Depth, -INFINITY, INFINITY, false, PlayingAs);
+            // cout << "\n\n\n" << score;
+
+            // Update the best move if needed
+            if (score >= bestScore)
+            {
+                bestScore = score;
+                bestMove = move;
+            }
+        }
+
+        possibleMoves.clear();
+        auto end = high_resolution_clock::now();
+        auto duration = duration_cast<milliseconds>(end - start);
+        TimeTakenForSearch = duration.count();
+        return bestMove;
+    }
+
+    float Minimax(ChessBoard &board, int depth, float alpha, float beta, bool maximizingPlayer, char color)
+    {
+        NumberofMovesLookedAhead++;
+
+        // Base case: reached maximum depth or terminal state (checkmate)
+        if (depth == 0)
+        {
+            return Evaluate(board, color);
+        }
+        if (board.isCheckmate(board, color))
+        {
+            return (maximizingPlayer ? -INFINITY : INFINITY); // Checkmate score
+        }
+
+        // Maximizing player's turn
+        if (maximizingPlayer)
+        {
+            float maxScore = -INFINITY;
+            vector<string> possibleMoves = board.GetAllPossibleMovesInChessNotation(color);
+            shuffleMoves(possibleMoves);
+
+            for (const string &move : possibleMoves)
+            {
+                ChessBoard tempBoard = board; // Make a copy of the board to simulate moves
+                pair<int, int> Indices = convertChessNotationToIndices(move);
+                // tempBoard.MakeMove(Indices.first, Indices.second); // Make the move directly without isValidMove()
+                MakeCompleteMove(Indices.first, Indices.second, tempBoard);
+
+                // Recursive call for the opponent with a reduced depth
+                float score = Minimax(tempBoard, depth - 1, alpha, beta, false, color);
+
+                // Update alpha and maxScore
+                maxScore = max(maxScore, score);
+                alpha = max(alpha, score);
+
+                // Alpha-beta pruning
+                if (beta <= alpha)
+                {
+                    break;
+                }
+            }
+            possibleMoves.clear();
+            return maxScore;
+        }
+        // Minimizing player's turn
+        else
+        {
+            float minScore = INFINITY;
+            vector<string> possibleMoves = board.GetAllPossibleMovesInChessNotation((color == 'W' ? 'B' : 'W'));
+            shuffleMoves(possibleMoves);
+
+            for (const string &move : possibleMoves)
+            {
+                ChessBoard tempBoard = board; // Make a copy of the board to simulate moves
+                pair<int, int> Indices = convertChessNotationToIndices(move);
+                MakeCompleteMove(Indices.first, Indices.second, tempBoard);
+                // tempBoard.MakeMove(Indices.first, Indices.second); // Make the move directly without isValidMove()
+
+                // Recursive call for the opponent with a reduced depth
+                float score = Minimax(tempBoard, depth - 1, alpha, beta, true, color);
+
+                // Update beta and minScore
+                minScore = min(minScore, score);
+                beta = min(beta, score);
+
+                // Alpha-beta pruning
+                if (beta <= alpha)
+                {
+                    break;
+                }
+            }
+            possibleMoves.clear();
+            return minScore;
+        }
+    }
+
+    void MakeCompleteMove(int fromTile, int toTile, ChessBoard &chessboard) const
+    {
+        chessboard.MakeMove(fromTile, toTile);
+
+        // Check for pawn promotion
+        if (toupper(chessboard.board[toTile].type) == PAWN)
+        {
+            // White pawn promotion
+            if (toTile >= 0 && toTile <= 7)
+            {
+                chessboard.promotePawn(toTile);
+            }
+            // Black pawn promotion
+            else if (toTile >= 56 && toTile <= 63)
+            {
+                cout << "Test";
+                chessboard.promotePawn(toTile);
+            }
+        }
+        chessboard.currentPlayerIsWhite = !chessboard.currentPlayerIsWhite;
+    }
+
+    float Evaluate(const ChessBoard &chessboard, char currentPlayerColor) const
+    {
+        unordered_map<char, float> pieceValues;
+        // Piece values for evaluation
+        if (PlayingAs == 'W')
+        {
+            pieceValues = {
+                {'P', 100}, {'N', 320}, {'B', 330}, {'R', 500}, {'Q', 900}, {'K', INFINITY}, {'p', -100}, {'n', -320}, {'b', -330}, {'r', -500}, {'q', -900}, {'k', -INFINITY}};
+        }
+        else
+        {
+            pieceValues = {
+                {'P', -100}, {'N', -320}, {'B', -330}, {'R', -500}, {'Q', -900}, {'K', -INFINITY}, {'p', 100}, {'n', 320}, {'b', 330}, {'r', 500}, {'q', 900}, {'k', INFINITY}};
+        }
+
+        // Evaluate material advantage
+        float SelfMaterial = 0, OpponentMeterial = 0;
+        for (int i = 0; i < Total_tiles; ++i)
+        {
+            ChessPiece piece = chessboard.board[i];
+            if (piece.type != EMPTY)
+            {
+                if (piece.color == PlayingAs)
+                {
+                    SelfMaterial += pieceValues[piece.type];
+                }
+                else
+                {
+                    OpponentMeterial += pieceValues[piece.type];
+                }
+            }
+        }
+        float materialAdvantage = (currentPlayerColor == 'W') ? (SelfMaterial - OpponentMeterial) : (OpponentMeterial - SelfMaterial);
+
+        // Evaluate positional advantage using PSTs
+        float positionalAdvantage = 0;
+        bool isEndgame = (SelfMaterial < 120 && OpponentMeterial < 120); // Check if it's an endgame
+        for (int i = 0; i < Total_tiles; ++i)
+        {
+            ChessPiece piece = chessboard.board[i];
+            if (piece.type != EMPTY)
+            {
+                int pieceValue = getPSTValue(piece, i, currentPlayerColor);
+                positionalAdvantage += pieceValue;
+            }
+            // Adjust king's positional advantage during endgames
+            if (isEndgame)
+            {
+                adjustEndgamePositionalAdvantage(chessboard, currentPlayerColor, positionalAdvantage);
+            }
+
+            // Evaluate pawn promotion during endgames
+            if (toupper(piece.type) == PAWN && isEndgame)
+            {
+                // Check if the pawn can be promoted
+                if ((piece.color == 'W' && i >= 48) || (piece.color == 'B' && i <= 15))
+                {
+                    // Evaluate the potential gain from pawn promotion
+                    positionalAdvantage += (currentPlayerColor == PlayingAs ? 900 : -900); // Adjust as needed
+                }
+            }
+        }
+
+        // Total evaluation is a combination of material, positional, and safety advantages
+        return materialAdvantage + positionalAdvantage;
+    }
+
+    void adjustEndgamePositionalAdvantage(const ChessBoard &chessboard, char currentPlayerColor, float &positionalAdvantage) const
+    {
+
+        int kingSquareIndex = chessboard.GetKingIndex(currentPlayerColor);
+        int opponentKingSquareIndex = chessboard.GetKingIndex((currentPlayerColor == 'W') ? 'B' : 'W');
+
+        int kingRow = kingSquareIndex / 8;
+        int kingCol = kingSquareIndex % 8;
+        int opponentKingRow = opponentKingSquareIndex / 8;
+        int opponentKingCol = opponentKingSquareIndex % 8;
+
+        // Encourage forcing opponent's king to the corner
+        int cornerDist = min(min(opponentKingRow, 7 - opponentKingRow), min(opponentKingCol, 7 - opponentKingCol));
+        positionalAdvantage += (currentPlayerColor == PlayingAs ? 10 : -10) * cornerDist;
+
+        // Encourage bringing own king closer to the opponent's king
+        int kingDist = abs(kingRow - opponentKingRow) + abs(kingCol - opponentKingCol);
+        positionalAdvantage += (currentPlayerColor == PlayingAs ? -5 : 5) * kingDist;
+    }
+
+    int getPSTValue(ChessPiece piece, int squareIndex, char currentPlayerColor) const
+    {
+        const int *piecePST = nullptr;
+
+        char pieceType = toupper(piece.type);
+
+        if (pieceType == PAWN)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(PawnPST) : PawnPST;
+        }
+        else if (pieceType == KNIGHT)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(KnightsPST) : KnightsPST;
+        }
+        else if (pieceType == BISHOP)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(BishopsPST) : BishopsPST;
+        }
+        else if (pieceType == ROOK)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(RooksPST) : RooksPST;
+        }
+        else if (pieceType == QUEEN)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(QueensPST) : QueensPST;
+        }
+        else if (pieceType == KING)
+        {
+            piecePST = (currentPlayerColor == 'B') ? InvertTable(KingPST) : KingPST;
+        }
+
+        if (piecePST != nullptr)
+        {
+            return piecePST[squareIndex];
+        }
+        else
+        {
+
+            return 0;
+        }
+    }
+
+    pair<int, int> convertChessNotationToIndices(const string &move) const
+    {
+        int fromCol = move[0] - 'a';
+        int fromRow = 7 - (move[1] - '1');
+        int toCol = move[2] - 'a';
+        int toRow = 7 - (move[3] - '1');
+        int fromTile = fromRow * 8 + fromCol;
+        int toTile = toRow * 8 + toCol;
+        return make_pair(fromTile, toTile);
+    }
+
+    void PlayMove(const string &move, ChessBoard &board) const
+    {
+
+        pair<int, int> Indices = convertChessNotationToIndices(move);
+
+        // string player = (color == 'W') ? "White" : "Black";
+        // cout << player << " plays: " << move << endl;
+        board.MakeCompleteMove(Indices.first, Indices.second, move);
+    }
+
+    int *InvertTable(const int *originalArray) const
+    {
+        int *invertedArray = new int[Total_tiles]; // Create an array of size 64
+
+        for (int i = 0; i < Total_tiles; i++)
+        {
+            invertedArray[i] = originalArray[63 - i];
+        }
+
+        return invertedArray;
+    }
+
+    int readEloFromFile()
+    {
+        ifstream inputFile;
+        string filename = string(1, PlayingAs) + "ELO.txt";
+        inputFile.open(filename);
+
+        int elo = engineEloRating; // Default value in case the file cannot be opened
+
+        if (inputFile.is_open())
+        {
+            inputFile >> elo;
+            inputFile.close();
+            cout << "Elo rating read from " << filename << ": " << elo << endl;
+        }
+        else
+        {
+            cerr << "Unable to open file " << filename << " for reading. Using default Elo rating." << endl;
+        }
+
+        return elo;
+    }
+
+    void DisplayTable(const int *table) const
+    {
+        cout << "\n\n\n";
+        for (int i = 0; i < 8; ++i)
+        {
+            for (int j = 0; j < 8; ++j)
+            {
+                cout << table[i * 8 + j] << " ";
+            }
+            cout << endl;
+        }
+        cout << "\n\n\n";
+    }
+
+    void saveEloToFile() const
+    {
+        ofstream outputFile;
+        string filename = string(1, PlayingAs) + "ELO.txt";
+        outputFile.open(filename);
+
+        int defaultElo = 500;
+
+        if (outputFile.is_open())
+        {
+
+            outputFile << engineEloRating << endl;
+            outputFile.close();
+            cout << "Elo rating saved to " << filename << endl;
+        }
+        else
+        {
+            cerr << "Unable to open file " << filename << " for writing. Creating a new file with default Elo rating." << endl;
+            outputFile.open(filename);
+            if (outputFile.is_open())
+            {
+                outputFile << defaultElo << endl;
+                outputFile.close();
+                cout << "New file created with default Elo rating: " << defaultElo << endl;
+            }
+            else
+            {
+                cerr << "Unable to create file " << filename << " for writing." << endl;
+            }
+        }
+    }
+
+    void Reset()
+    {
+        TimeTakenForSearch = 0;
+        NumberofMovesLookedAhead = 0;
+    }
+
+    bool CheckAfterMove(const string &move, const ChessBoard &board, char color) const
+    {
+        ChessBoard tempBoard = board;
+        pair<int, int> indices = convertChessNotationToIndices(move);
+        MakeCompleteMove(indices.first, indices.second, tempBoard);
+
+        return tempBoard.isCheck(tempBoard, (color == 'W' ? 'B' : 'W'), "Engine: Check after move");
+    }
+
+    bool IsCaptureMove(const string &move, const ChessBoard board) const
+    {
+        pair<int, int> indices = convertChessNotationToIndices(move);
+        ChessPiece targetPiece = board.GetPieceAtPosition(indices.second);
+
+        return targetPiece.color != board.GetPieceAtPosition(indices.first).color && targetPiece.color != EMPTY;
+    }
+};
+
+class User : public ReadWrite
+{
+
+public:
+    string Username;
+    int ELO = 500;
+
+    User(string name) : Username(name)
+    {
+        ELO = readEloFromFile();
+    }
+
+    int readEloFromFile()
+    {
+        cout << "TEst" << endl;
+        ifstream inputFile;
+        string filename = Username + "ELO.txt";
+        inputFile.open(filename);
+        int elo = ELO; // Default value in case the file cannot be opened
+        if (inputFile.is_open())
+        {
+            inputFile >> elo;
+            inputFile.close();
+            cout << "Elo rating read from " << filename << ": " << elo << endl;
+        }
+        else
+        {
+            cerr << "Unable to open file " << filename << " for reading. Using default Elo rating." << endl;
+        }
+
+        return elo;
+    }
+
+    void saveEloToFile() const
+    {
+        ofstream outputFile;
+        string filename = Username + "ELO.txt";
+        outputFile.open(filename);
+        int defaultElo = 500;
+        if (outputFile.is_open())
+        {
+
+            outputFile << ELO << endl;
+            outputFile.close();
+            cout << "Elo rating saved to " << filename << endl;
+        }
+        else
+        {
+            cerr << "Unable to open file " << filename << " for writing. Creating a new file with default Elo rating." << endl;
+            outputFile.open(filename);
+            if (outputFile.is_open())
+            {
+                outputFile << defaultElo << endl;
+                outputFile.close();
+                cout << "New file created with default Elo rating: " << defaultElo << endl;
+            }
+            else
+            {
+                cerr << "Unable to create file " << filename << " for writing." << endl;
+            }
+        }
+    }
+};
+
+class BoardStats
+{
+private:
+    const float TextSize = 40;
+    const float fontSize = 20;
+    const float textX = 550;
+    const float textY = 20;
+    const int BoardDimensions = tileSize * boardSize;
+
+public:
+    bool ShowMoveHistory;
+    bool CalculateELO;
+    char winner;
+
+    BoardStats()
+    {
+        ShowMoveHistory = false;
+        winner = ' ';
+        CalculateELO = true;
+    }
+
+    void DisplayMessage(string message)
+    {
+        float TextPositionX = static_cast<float>(BoardDimensions + (screenWidth - BoardDimensions) / 2); // Centers text on X-axis of Remaining Area
+        float TextPositionY = static_cast<float>(screenHeight) / 2;                                      // Centers text on Y-axis
+        TextPositionX = TextPositionX - static_cast<float>(MeasureText(message.c_str(), static_cast<int>(TextSize))) / 2;
+        TextPositionY = TextPositionY - TextSize / 2;
+        DrawTextWithCustomFont(message.c_str(), TextPositionX, TextPositionY, TextSize, RED); // Balance Based on TextSize
+    }
+
+    bool GameIsEnded(ChessBoard &board)
+    {
+        char playerColor = board.isCurrentPlayerWhite() ? 'W' : 'B';
+
+        string EndMessage;
+
+        if (board.isCheck(board, playerColor, "stats: Game is Ended: Winner"))
+        {
+            if (board.isCheckmate(board, playerColor))
+            {
+                string EndMessage = "Winner is ";
+                EndMessage += (board.isCurrentPlayerWhite() ? "Black" : "White");
+                winner = board.isCurrentPlayerWhite() ? 'B' : 'W';
+                DisplayMessage(EndMessage);
+                // PlaySound(GameEnds);
+                return true;
+            }
+        }
+        if (!board.isCheck(board, playerColor, "stats: Game is Ended: stalemate") && board.GetAllPossibleMoves(playerColor).size() == 0)
+        {
+            string EndMessage = "---Stalemate---";
+            DisplayMessage(EndMessage);
+            return true;
+        }
+        if (board.calculatePlayerScore('W') <= 100 && board.calculatePlayerScore('B') <= 100)
+        {
+            string EndMessage = "---Draw---";
+            DisplayMessage(EndMessage);
+            return true;
+        }
+
+        return false;
+    }
+
+    void DisplayStats(ChessBoard chessboard, ChessEngine engine, User player)
+    {
+
+        int LookAheads = engine.NumberofMovesLookedAhead;
+        auto TimeTaken = engine.TimeTakenForSearch;
+
+        int whiteScore = chessboard.calculatePlayerScore('W');
+        int blackScore = chessboard.calculatePlayerScore('B');
+
+        string LastMovePlayed = "";
+        string BlackMessage = "Saw " + to_string(LookAheads) + " futures in " + to_string(TimeTaken) + " milliseconds";
+
+        string currentPlayer = (chessboard.isCurrentPlayerWhite()) ? "White" : "Black";
+
+        if (chessboard.moveHistory.size() != 0)
+        {
+            LastMovePlayed = chessboard.moveHistory.back();
+        }
+
+        // Display if Black Is in check
+        // Display Black Score
+        // Display Engine message
+        // Display Last Move
+        // Display Current Player
+        // Display white Score
+        // Display if White Is in Check
+
+        // Black
+        if (chessboard.isCheck(chessboard, 'B', "Stats: DisplayStats: black"))
+        {
+            DrawTextWithCustomFont("Black King is in Check", textX, (tileSize * 1) - fontSize, fontSize, RED);
+        }
+        else
+        {
+            DrawTextWithCustomFont("Black King is not in Check", textX, (tileSize * 1) - fontSize, fontSize, BLACK);
+        }
+
+        DrawTextWithCustomFont(("Black ELO: " + to_string(engine.engineEloRating)).c_str(), textX, (tileSize * 2 - fontSize) - fontSize, fontSize, BLACK);
+        DrawTextWithCustomFont(("Black Player Score: " + to_string(blackScore)).c_str(), textX, (tileSize * 3 - fontSize) - fontSize, fontSize, BLACK);
+        DrawTextWithCustomFont(BlackMessage.c_str(), textX, (tileSize * 2 + fontSize) - (fontSize - 0), fontSize - 4, BLACK);
+
+        // Current Player
+        DrawTextWithCustomFont(("Current Player: " + currentPlayer).c_str(), textX, static_cast<float>(screenHeight) / 2, fontSize, (currentPlayer == "White") ? WHITE : BLACK);
+        DrawTextWithCustomFont(LastMovePlayed.c_str(), textX, (tileSize * 5 + fontSize) - fontSize, fontSize, RED);
+
+        // White
+
+        DrawTextWithCustomFont(("White Player Score: " + to_string(whiteScore)).c_str(), textX, (tileSize * 5 + fontSize) + fontSize, fontSize, WHITE);
+        DrawTextWithCustomFont(("White ELO: " + to_string(player.ELO)).c_str(), textX, (tileSize * 6 + fontSize) + fontSize, fontSize, WHITE);
+
+        if (chessboard.isCheck(chessboard, 'W', "Stats: DisplayStats: white"))
+        {
+            DrawTextWithCustomFont("White King is in Check", textX, (tileSize * 7) + fontSize, fontSize, RED);
+        }
+        else
+        {
+            DrawTextWithCustomFont("White King is not in Check", textX, (tileSize * 7) + fontSize, fontSize, WHITE);
+        }
+    }
+
+    void DisplayStats(ChessBoard chessboard, ChessEngine Black, ChessEngine White)
+    {
+
+        int LookAheadsBlack = Black.NumberofMovesLookedAhead;
+        auto TimeTakenBlack = Black.TimeTakenForSearch;
+        int LookAheadsWhite = White.NumberofMovesLookedAhead;
+        auto TimeTakenWhite = White.TimeTakenForSearch;
+        int whiteScore = chessboard.calculatePlayerScore('W');
+        int blackScore = chessboard.calculatePlayerScore('B');
+
+        string LastMovePlayed = "";
+        string BlackMessage = "Saw " + to_string(LookAheadsBlack) + " futures in " + to_string(TimeTakenBlack) + " milliseconds";
+        string WhiteMessage = "Saw " + to_string(LookAheadsWhite) + " futures in " + to_string(TimeTakenWhite) + " milliseconds";
+        string currentPlayer = (chessboard.isCurrentPlayerWhite()) ? "White" : "Black";
+
+        if (chessboard.moveHistory.size() != 0)
+        {
+            LastMovePlayed = chessboard.moveHistory.back();
+        }
+
+        // Display if Black Is in check
+        // Display Black Score
+        // Display Engine message
+        // Display Last Move
+        // Display Current Player
+        // Display white Score
+        // Display if White Is in Check
+
+        // Black
+        if (chessboard.isCheck(chessboard, 'B', "Stats: DisplayStats: black: 2"))
+        {
+            DrawTextWithCustomFont("Black King is in Check", textX, (tileSize * 1) - fontSize, fontSize, RED);
+        }
+        else
+        {
+            DrawTextWithCustomFont("Black King is not in Check", textX, (tileSize * 1) - fontSize, fontSize, BLACK);
+        }
+
+        DrawTextWithCustomFont(("Black ELO: " + to_string(Black.engineEloRating)).c_str(), textX, (tileSize * 2 - fontSize) - fontSize, fontSize, BLACK);
+        DrawTextWithCustomFont(("Black Player Score: " + to_string(blackScore)).c_str(), textX, (tileSize * 3 - fontSize) - fontSize, fontSize, BLACK);
+        DrawTextWithCustomFont(BlackMessage.c_str(), textX, (tileSize * 2 + fontSize) - (fontSize - 0), fontSize - 4, BLACK);
+
+        // Current Player
+        DrawTextWithCustomFont(("Current Player: " + currentPlayer).c_str(), textX, static_cast<float>(screenHeight) / 2, fontSize, (currentPlayer == "White") ? WHITE : BLACK);
+        DrawTextWithCustomFont(LastMovePlayed.c_str(), textX, (tileSize * 5 + fontSize) - fontSize, fontSize, RED);
+
+        // White
+        DrawTextWithCustomFont(WhiteMessage.c_str(), textX, (tileSize * 7 + fontSize) - (fontSize - 0), fontSize - 4, WHITE);
+        DrawTextWithCustomFont(("White Player Score: " + to_string(whiteScore)).c_str(), textX, (tileSize * 5 + fontSize) + fontSize, fontSize, WHITE);
+        DrawTextWithCustomFont(("White ELO: " + to_string(White.engineEloRating)).c_str(), textX, (tileSize * 6 + fontSize) + fontSize, fontSize, WHITE);
+
+        if (chessboard.isCheck(chessboard, 'W', "Stats: DisplayStats: black: 1"))
+        {
+            DrawTextWithCustomFont("White King is in Check", textX, (tileSize * 7) + fontSize, fontSize, RED);
+        }
+        else
+        {
+            DrawTextWithCustomFont("White King is not in Check", textX, (tileSize * 7) + fontSize, fontSize, WHITE);
+        }
+    }
+
+    void DisplayMoveHistory(ChessBoard chessboard)
+    {
+        string Moves = "";
+        for (int index = 0; index < chessboard.moveHistory.size(); index++)
+        {
+            Moves += chessboard.moveHistory[index];
+            Moves += ", ";
+            if (index % 6 == 0 && index != 0)
+            {
+                Moves += "\n\n";
+            }
+        }
+        DrawTextWithCustomFont(Moves.c_str(), textX, textY, fontSize, RED);
+    }
+
+    double calculateExpectedScore(double engineRating, double opponentRating)
+    {
+        return 1.0 / (1 + pow(10, (opponentRating - engineRating) / 400));
+    }
+
+    int updateEloRating(int engineRating, int opponentRating, bool engineWon)
+    {
+        double expectedScore = calculateExpectedScore(engineRating, opponentRating);
+        double actualScore = engineWon ? 1.0 : 0.0;
+        double kFactor = 42; // Adjust the K-factor as needed
+
+        // Update the Elo rating based on the outcome
+        return static_cast<int>(engineRating + kFactor * (actualScore - expectedScore));
+    }
+
+    void Reset()
+    {
+        ShowMoveHistory = false;
+        winner = ' ';
+        CalculateELO = true;
+    }
+};
+
+class GameModes
+{
+    ChessBoard chessBoard;
+    BoardStats statistics;
+    ChessEngine Black;
+    ChessEngine White;
+    User Player;
+
+public:
+    void SinglePlayerMode()
+    {
+    }
+};
+
+int main()
+{
+    InitWindow(screenWidth, screenHeight, "Chess");
+    InitAudioDevice();
+    ChessBoard chessboard;
+    BoardStats GameStats;
+    ChessEngine Black('B');
+    User Taha("Taha");
+
+    string FENString = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq";
+    // string FENString = "2k5/ppp5/8/8/8/8/2p1p1pp/4K3 w KQkq";
+    // string FENString = "8/p5k1/8/8/8/8/7P/7K w KQkq";
+    //  string FENString = "3rr3/3k4/8/8/3K4/8/8/8 w KQkq";
+    // string FENString = "4kbnr/8/8/8/8/8/8/5K1R w k";
+    // string FENString = "6Q1/8/8/8/8/8/K5R1/7k w KQkq";
+
+    ChessPiecePlaced = LoadSound(ChessPiecePlacedFile.c_str());
+    ChessPieceCaptured = LoadSound(ChessPieceCapturedFile.c_str());
+    KingChecked = LoadSound(KingCheckedFile.c_str());
+    GameStarts = LoadSound(GameStartsFile.c_str());
+    GameEnds = LoadSound(GameEndsFile.c_str());
+
+    Image icon = LoadImage(programIcon.c_str());
+
+    SetWindowIcon(icon);
+
+    myFont = LoadFont(fontFile.c_str());
+    string move;
+
+    bool DoneOnce = false;
+    SetTargetFPS(60);
+    bool gameStarted = false;
+
+    Rectangle StartButton = {screenWidth / 2 - 100, screenHeight / 2 - 50, 200, 75};
+    pair<float, float> StartButtonLocation = CalculateTextPosition(StartButton, "Start Game");
+
+    // Main menu loop
+    while (!WindowShouldClose())
+    {
+        // Draw
+        BeginDrawing();
+        ClearBackground(Background);
+        // Check if the game has started
+        if (gameStarted)
+        {
+
+            if (IsKeyPressed(KEY_SPACE))
+            {
+                PlaySound(KingChecked);
+            }
+
+            if (!DoneOnce)
+            {
+                PlaySound(GameStarts);
+                chessboard.initializeBoardFromFEN(FENString);
+
+                DoneOnce = true;
+            }
+
+            if (!GameStats.GameIsEnded(chessboard))
+            {
+                vector<string> PossibleMoves = chessboard.GetAllPossibleMovesInChessNotation(chessboard.isCurrentPlayerWhite() ? 'W' : 'B');
+
+                if (chessboard.isCurrentPlayerWhite())
+                {
+                    chessboard.ComputeOpponentMoves();
+
+                    for (int i = 0; i < Total_tiles; i++)
+                    {
+                        if (chessboard.board[i].color == 'W')
+                        {
+                            chessboard.UpdateChessPiece(chessboard.board[i], i);
+                        }
+                    }
+                }
+                else
+                {
+                    chessboard.ComputeOpponentMoves();
+                    thread AIMOVE([&move, &Black, &chessboard]()
+                                  { move = Black.GenerateMove(chessboard); });
+                    AIMOVE.detach();
+
+                    Black.PlayMove(move, chessboard);
+                }
+
+                if (IsKeyPressed(KEY_H))
+                {
+                    GameStats.ShowMoveHistory = !GameStats.ShowMoveHistory;
+                }
+
+                if (GameStats.ShowMoveHistory)
+                {
+                    GameStats.DisplayMoveHistory(chessboard);
+                }
+                else
+                {
+                    GameStats.DisplayStats(chessboard, Black, Taha);
+                }
+
+                chessboard.DrawBoard();
+                chessboard.DrawChessPiece();
+            }
+
+            else
+            {
+                chessboard.DrawBoard();
+                chessboard.DrawChessPiece();
+                if (GameStats.CalculateELO)
+                {
+
+                    int oldBlackELO = Black.engineEloRating;
+                    Black.engineEloRating = GameStats.updateEloRating(Black.engineEloRating, Taha.ELO, (GameStats.winner == 'B'));
+                    Taha.ELO = GameStats.updateEloRating(Taha.ELO, oldBlackELO, (GameStats.winner == 'W'));
+                    Taha.saveEloToFile();
+                    Black.saveEloToFile();
+                    chessboard.saveMatchHistoryToFile();
+                    GameStats.CalculateELO = false;
+                }
+                if (IsKeyPressed(KEY_R))
+                {
+                    DoneOnce = false;
+                    GameStats.Reset();
+                    Black.Reset();
+                    chessboard.DestroyBoard();
+                }
+                if (IsKeyPressed(KEY_M))
+                {
+                    DoneOnce = false;
+                    GameStats.Reset();
+                    Black.Reset();
+                    chessboard.DestroyBoard();
+                    gameStarted = false;
+                }
+            }
+        }
+
+        else
+        {
+            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            {
+                if (CheckCollisionPointRec(GetMousePosition(), StartButton))
+                {
+                    gameStarted = true;
+                }
+            }
+            DrawRectangle(static_cast<int>(StartButton.x), static_cast<int>(StartButton.y), static_cast<int>(StartButton.width), static_cast<int>(StartButton.height), GRAY);
+            DrawTextWithCustomFont("Start Game", StartButtonLocation.first, StartButtonLocation.second, 25, BLACK);
+        }
+        EndDrawing();
+    }
+    chessboard.DestroyBoard();
+    UnloadSound(ChessPiecePlaced);
+    UnloadSound(ChessPieceCaptured);
+    UnloadSound(KingChecked);
+    UnloadSound(GameEnds);
+    UnloadSound(GameStarts);
+    UnloadFont(myFont);
+    UnloadImage(icon);
+    CloseAudioDevice();
+    CloseWindow();
+    return 0;
+}

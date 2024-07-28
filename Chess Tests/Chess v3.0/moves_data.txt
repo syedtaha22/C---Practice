@@ -1,0 +1,2 @@
+your_current_fen_string your_generated_move
+your_current_fen_string your_generated_move
