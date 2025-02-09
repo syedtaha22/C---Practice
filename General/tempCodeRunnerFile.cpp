@@ -1,2 +1,1 @@
-    // cout << new_column << endl;
-    // cout << new_row << endl;
+std::abs((curr - prev) / curr) * 100
